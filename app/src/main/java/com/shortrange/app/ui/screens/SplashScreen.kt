@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
@@ -66,7 +67,9 @@ fun SplashScreen(
             Image(
                 painter = painterResource(id = R.drawable.ic_sr_logo),
                 contentDescription = "Short Range Logo",
-                modifier = Modifier.size(130.dp)
+                modifier = Modifier
+                    .width(160.dp)
+                    .height(104.dp)
             )
 
             Spacer(modifier = Modifier.height(28.dp))

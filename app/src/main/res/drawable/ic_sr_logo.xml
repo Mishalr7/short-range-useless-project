@@ -1,63 +1,29 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="120dp"
-    android:height="120dp"
-    android:viewportWidth="120"
-    android:viewportHeight="120">
-
-    <!-- Outer stylized SR silhouette -->
-    <!-- Left Handset Head & R shape -->
+    android:width="610dp"
+    android:height="395dp"
+    android:viewportWidth="610"
+    android:viewportHeight="395">
     <path
+        android:pathData="M342,187L339,194L345,197L354,206L360,217L363,229L362,246L359,255L353,266L341,277L346,283L359,271L366,259L370,246L371,230L367,213L361,202L350,191Z"
         android:fillColor="#111111"
-        android:pathData="M 38,16
-            C 22,16 12,28 12,44
-            C 12,56 18,67 27,74
-            L 27,86
-            L 40,86
-            L 40,79
-            C 44,79 48,77 52,74
-            L 60,86
-            L 76,86
-            L 65,70
-            C 72,66 76,59 76,50
-            C 76,41 71,34 64,30
-            L 64,16
-            Z
-            M 36,28
-            C 42,28 46,31 48,36
-            L 32,52
-            C 29,48 28,43 28,39
-            C 28,33 31,28 36,28
-            Z
-            M 56,40
-            C 60,42 63,45 63,50
-            C 63,55 59,59 54,59
-            L 42,59
-            L 42,40
-            Z" />
-
-    <!-- Red Signal Transceiver Dot -->
+        android:fillType="evenOdd"/>
     <path
-        android:fillColor="#D62828"
-        android:pathData="M 72,52 A 4,4 0 1,1 64,52 A 4,4 0 1,1 72,52 Z" />
-
-    <!-- First Radiating Signal Arc -->
+        android:pathData="M359,164L356,171L363,175L378,191L385,204L390,222L390,246L387,259L381,273L373,285L359,298L364,304L379,290L386,280L392,268L398,245L398,223L394,206L386,189L375,175L368,169Z"
+        android:fillColor="#111111"
+        android:fillType="evenOdd"/>
     <path
-        android:strokeColor="#111111"
-        android:strokeWidth="3.5"
-        android:strokeLineCap="round"
-        android:pathData="M 76,44 C 80,48 80,56 76,60" />
-
-    <!-- Second Radiating Signal Arc -->
+        android:pathData="M115,132L115,141L120,153L136,183L165,222L199,256L227,277L252,290L270,295L283,295L287,294L295,289L302,279L303,276L302,269L268,238L260,237L242,249L234,250L222,244L205,232L178,206L166,190L163,183L164,179L175,170L176,162L151,119L148,116L139,117L119,127Z"
+        android:fillColor="#111111"
+        android:fillType="evenOdd"/>
     <path
-        android:strokeColor="#111111"
-        android:strokeWidth="3.5"
-        android:strokeLineCap="round"
-        android:pathData="M 83,38 C 90,45 90,59 83,66" />
-
-    <!-- Third Radiating Signal Arc -->
+        android:pathData="M251,86L251,205L298,205L298,146L299,145L382,145L398,151L412,164L416,170L421,182L423,191L423,198L424,199L422,228L416,251L408,268L391,292L372,310L373,313L416,373L511,373L510,370L435,264L458,250L481,231L489,220L497,201L500,187L500,162L499,161L499,156L494,138L489,128L482,118L471,107L456,97L435,89L419,86L407,86L406,85Z"
+        android:fillColor="#111111"
+        android:fillType="evenOdd"/>
     <path
-        android:strokeColor="#111111"
-        android:strokeWidth="3.5"
-        android:strokeLineCap="round"
-        android:pathData="M 90,32 C 100,42 100,62 90,72" />
+        android:pathData="M135,22L119,30L103,42L91,55L83,67L76,82L72,96L71,122L72,123L73,133L79,150L92,174L117,210L162,270L176,294L180,310L180,331L177,344L173,353L167,362L160,369L155,372L272,372L279,370L286,366L294,358L298,350L301,336L301,312L293,312L285,314L268,314L242,307L217,294L189,273L155,239L137,217L125,200L111,177L102,159L96,143L95,131L97,124L101,118L114,107L126,99L143,90L157,84L160,84L171,80L189,78L190,77L298,77L298,14L173,14L172,15L152,17Z"
+        android:fillColor="#111111"
+        android:fillType="evenOdd"/>
+    <path
+        android:pathData="M324.11,234.92m-17.21,0a17.21,17.21 0,1 1,34.42 0a17.21,17.21 0,1 1,-34.42 0"
+        android:fillColor="#D62828"/>
 </vector>

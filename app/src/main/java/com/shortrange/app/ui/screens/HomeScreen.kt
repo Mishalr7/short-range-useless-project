@@ -66,7 +66,9 @@ fun HomeScreen(
                 Image(
                     painter = painterResource(id = R.drawable.ic_sr_logo),
                     contentDescription = "Short Range Logo",
-                    modifier = Modifier.size(105.dp)
+                    modifier = Modifier
+                        .width(135.dp)
+                        .height(88.dp)
                 )
 
                 Spacer(modifier = Modifier.height(20.dp))

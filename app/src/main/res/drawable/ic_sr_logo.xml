@@ -1,0 +1,63 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="120dp"
+    android:height="120dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+
+    <!-- Outer stylized SR silhouette -->
+    <!-- Left Handset Head & R shape -->
+    <path
+        android:fillColor="#111111"
+        android:pathData="M 38,16
+            C 22,16 12,28 12,44
+            C 12,56 18,67 27,74
+            L 27,86
+            L 40,86
+            L 40,79
+            C 44,79 48,77 52,74
+            L 60,86
+            L 76,86
+            L 65,70
+            C 72,66 76,59 76,50
+            C 76,41 71,34 64,30
+            L 64,16
+            Z
+            M 36,28
+            C 42,28 46,31 48,36
+            L 32,52
+            C 29,48 28,43 28,39
+            C 28,33 31,28 36,28
+            Z
+            M 56,40
+            C 60,42 63,45 63,50
+            C 63,55 59,59 54,59
+            L 42,59
+            L 42,40
+            Z" />
+
+    <!-- Red Signal Transceiver Dot -->
+    <path
+        android:fillColor="#D62828"
+        android:pathData="M 72,52 A 4,4 0 1,1 64,52 A 4,4 0 1,1 72,52 Z" />
+
+    <!-- First Radiating Signal Arc -->
+    <path
+        android:strokeColor="#111111"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M 76,44 C 80,48 80,56 76,60" />
+
+    <!-- Second Radiating Signal Arc -->
+    <path
+        android:strokeColor="#111111"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M 83,38 C 90,45 90,59 83,66" />
+
+    <!-- Third Radiating Signal Arc -->
+    <path
+        android:strokeColor="#111111"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M 90,32 C 100,42 100,62 90,72" />
+</vector>

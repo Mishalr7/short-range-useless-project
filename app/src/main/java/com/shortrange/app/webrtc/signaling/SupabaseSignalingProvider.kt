@@ -91,16 +91,11 @@ class SupabaseSignalingProvider : SignalingProvider {
             val ch = realtime.channel(channelTopic)
             channel = ch
 
-            // 3. Subscribe and wait until channel reaches SUBSCRIBED
-            ch.subscribe(blockUntilSubscribed = true)
-            Log.i(TAG, "Realtime channel reached SUBSCRIBED: $channelTopic")
+            // 3. Set up ALL flow listeners BEFORE subscribing.
+            //    broadcastFlow/presenceChangeFlow register internal callbacks when .collect starts.
+            //    If subscribe() fires first, early messages are silently dropped.
 
-            // 4. Track Presence (now guaranteed to succeed because channel is SUBSCRIBED)
-            val presenceJson = json.encodeToJsonElement(PresencePayload(participant_id = participantId, role = role)).jsonObject
-            ch.track(presenceJson)
-            Log.i(TAG, "Presence announced for participant: $participantId ($role)")
-
-            // 5. Listen for Presence changes (Case A: peer joins after subscription)
+            // Presence changes (Case A: peer joins after us)
             scope.launch {
                 ch.presenceChangeFlow().collect { diff ->
                     diff.joins.values.forEach { rawData ->
@@ -140,7 +135,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                 }
             }
 
-            // Case B: Presence sync already contains peer when channel becomes ready
+            // Presence sync (Case B: peer was already present when we join)
             scope.launch {
                 ch.presenceDataFlow<PresencePayload>().collect { presences ->
                     for (presence in presences) {
@@ -159,7 +154,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                 }
             }
 
-            // 6. Listen for Broadcast signaling (webrtc_offer)
+            // Broadcast: webrtc_offer
             scope.launch {
                 ch.broadcastFlow<BroadcastEnvelope>(EVENT_OFFER).collect { env ->
                     if (env.from == participantId) return@collect // Ignore own
@@ -182,7 +177,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                 }
             }
 
-            // Observe webrtc_answer Broadcast
+            // Broadcast: webrtc_answer
             scope.launch {
                 ch.broadcastFlow<BroadcastEnvelope>(EVENT_ANSWER).collect { env ->
                     if (env.from == participantId) return@collect // Ignore own
@@ -205,7 +200,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                 }
             }
 
-            // Observe ice_candidate Broadcast
+            // Broadcast: ice_candidate
             scope.launch {
                 ch.broadcastFlow<BroadcastEnvelope>(EVENT_ICE).collect { env ->
                     if (env.from == participantId) return@collect // Ignore own
@@ -229,6 +224,16 @@ class SupabaseSignalingProvider : SignalingProvider {
                     }
                 }
             }
+
+            // 4. Now subscribe — blocks until channel reaches SUBSCRIBED.
+            //    All flow collectors above are already active and will catch messages.
+            ch.subscribe(blockUntilSubscribed = true)
+            Log.i(TAG, "Realtime channel reached SUBSCRIBED: $channelTopic")
+
+            // 5. Track Presence (guaranteed safe because channel is SUBSCRIBED)
+            val presenceJson = json.encodeToJsonElement(PresencePayload(participant_id = participantId, role = role)).jsonObject
+            ch.track(presenceJson)
+            Log.i(TAG, "Presence announced for participant: $participantId ($role)")
 
         } catch (e: Exception) {
             Log.e(TAG, "Realtime connect error: ${e.message}", e)

@@ -15,6 +15,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -84,63 +86,25 @@ class SupabaseSignalingProvider : SignalingProvider {
         try {
             val realtime = SupabaseManager.client.realtime
 
-            // 1. Ensure Realtime client connection is active
+            // 1. Ensure Realtime WebSocket connection is active
             realtime.connect()
 
-            // 2. Create channel session:<session_code>
+            // 2. Create the channel
             val ch = realtime.channel(channelTopic)
             channel = ch
 
-            // 3. Set up ALL flow listeners BEFORE subscribing.
-            //    broadcastFlow/presenceChangeFlow register internal callbacks when .collect starts.
-            //    If subscribe() fires first, early messages are silently dropped.
+            // 3. Create all Flow references NOW (on this coroutine context).
+            //    This registers internal callbacks inside the channel immediately.
+            //    Then launch collection via .onEach{}.launchIn(scope).
+            //    (Following the official supabase-kt docs pattern exactly.)
 
-            // Presence changes (Case A: peer joins after us)
-            scope.launch {
-                ch.presenceChangeFlow().collect { diff ->
-                    diff.joins.values.forEach { rawData ->
-                        try {
-                            val presence = json.decodeFromJsonElement<PresencePayload>(rawData.state)
-                            if (presence.participant_id != participantId) {
-                                Log.i(TAG, "Peer presence joined (diff): ${presence.participant_id} (${presence.role})")
-                                peerParticipantId = presence.participant_id
-                                flushPendingCandidates()
-                                _events.emit(
-                                    SignalingEvent.PeerPresenceJoined(
-                                        peerParticipantId = presence.participant_id,
-                                        peerRole = presence.role
-                                    )
-                                )
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to parse presence join: ${e.message}")
-                        }
-                    }
-
-                    diff.leaves.values.forEach { rawData ->
-                        try {
-                            val presence = json.decodeFromJsonElement<PresencePayload>(rawData.state)
-                            if (presence.participant_id != participantId) {
-                                Log.i(TAG, "Peer presence left: ${presence.participant_id}")
-                                _events.emit(
-                                    SignalingEvent.PeerPresenceLeft(
-                                        peerParticipantId = presence.participant_id
-                                    )
-                                )
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to parse presence leave: ${e.message}")
-                        }
-                    }
-                }
-            }
-
-            // Presence sync (Case B: peer was already present when we join)
-            scope.launch {
-                ch.presenceDataFlow<PresencePayload>().collect { presences ->
-                    for (presence in presences) {
+            // Presence diff flow (Case A: peer joins/leaves after us)
+            ch.presenceChangeFlow().onEach { diff ->
+                diff.joins.values.forEach { rawData ->
+                    try {
+                        val presence = json.decodeFromJsonElement<PresencePayload>(rawData.state)
                         if (presence.participant_id != participantId) {
-                            Log.i(TAG, "Peer presence detected in sync: ${presence.participant_id} (${presence.role})")
+                            Log.i(TAG, "Peer presence joined (diff): ${presence.participant_id} (${presence.role})")
                             peerParticipantId = presence.participant_id
                             flushPendingCandidates()
                             _events.emit(
@@ -150,90 +114,119 @@ class SupabaseSignalingProvider : SignalingProvider {
                                 )
                             )
                         }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to parse presence join: ${e.message}")
                     }
                 }
-            }
+
+                diff.leaves.values.forEach { rawData ->
+                    try {
+                        val presence = json.decodeFromJsonElement<PresencePayload>(rawData.state)
+                        if (presence.participant_id != participantId) {
+                            Log.i(TAG, "Peer presence left: ${presence.participant_id}")
+                            _events.emit(
+                                SignalingEvent.PeerPresenceLeft(
+                                    peerParticipantId = presence.participant_id
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to parse presence leave: ${e.message}")
+                    }
+                }
+            }.launchIn(scope)
+
+            // Presence data flow (Case B: peer already present when we join)
+            ch.presenceDataFlow<PresencePayload>().onEach { presences ->
+                for (presence in presences) {
+                    if (presence.participant_id != participantId) {
+                        Log.i(TAG, "Peer presence detected in sync: ${presence.participant_id} (${presence.role})")
+                        peerParticipantId = presence.participant_id
+                        flushPendingCandidates()
+                        _events.emit(
+                            SignalingEvent.PeerPresenceJoined(
+                                peerParticipantId = presence.participant_id,
+                                peerRole = presence.role
+                            )
+                        )
+                    }
+                }
+            }.launchIn(scope)
 
             // Broadcast: webrtc_offer
-            scope.launch {
-                ch.broadcastFlow<BroadcastEnvelope>(EVENT_OFFER).collect { env ->
-                    if (env.from == participantId) return@collect // Ignore own
-                    if (env.to != participantId) return@collect   // Ignore if not for us
+            ch.broadcastFlow<BroadcastEnvelope>(EVENT_OFFER).onEach { env ->
+                if (env.from == participantId) return@onEach
+                if (env.to != participantId) return@onEach
 
-                    try {
-                        val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
-                        peerParticipantId = env.from
-                        flushPendingCandidates()
-                        Log.i(TAG, "Received webrtc_offer from ${env.from}")
-                        _events.emit(
-                            SignalingEvent.OfferReceived(
-                                sdp = sdpPayload.sdp,
-                                fromParticipantId = env.from
-                            )
+                try {
+                    val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
+                    peerParticipantId = env.from
+                    flushPendingCandidates()
+                    Log.i(TAG, "Received webrtc_offer from ${env.from}")
+                    _events.emit(
+                        SignalingEvent.OfferReceived(
+                            sdp = sdpPayload.sdp,
+                            fromParticipantId = env.from
                         )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse webrtc_offer payload: ${e.message}", e)
-                    }
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse webrtc_offer payload: ${e.message}", e)
                 }
-            }
+            }.launchIn(scope)
 
             // Broadcast: webrtc_answer
-            scope.launch {
-                ch.broadcastFlow<BroadcastEnvelope>(EVENT_ANSWER).collect { env ->
-                    if (env.from == participantId) return@collect // Ignore own
-                    if (env.to != participantId) return@collect   // Ignore if not for us
+            ch.broadcastFlow<BroadcastEnvelope>(EVENT_ANSWER).onEach { env ->
+                if (env.from == participantId) return@onEach
+                if (env.to != participantId) return@onEach
 
-                    try {
-                        val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
-                        peerParticipantId = env.from
-                        flushPendingCandidates()
-                        Log.i(TAG, "Received webrtc_answer from ${env.from}")
-                        _events.emit(
-                            SignalingEvent.AnswerReceived(
-                                sdp = sdpPayload.sdp,
-                                fromParticipantId = env.from
-                            )
+                try {
+                    val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
+                    peerParticipantId = env.from
+                    flushPendingCandidates()
+                    Log.i(TAG, "Received webrtc_answer from ${env.from}")
+                    _events.emit(
+                        SignalingEvent.AnswerReceived(
+                            sdp = sdpPayload.sdp,
+                            fromParticipantId = env.from
                         )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse webrtc_answer payload: ${e.message}", e)
-                    }
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse webrtc_answer payload: ${e.message}", e)
                 }
-            }
+            }.launchIn(scope)
 
             // Broadcast: ice_candidate
-            scope.launch {
-                ch.broadcastFlow<BroadcastEnvelope>(EVENT_ICE).collect { env ->
-                    if (env.from == participantId) return@collect // Ignore own
-                    if (env.to != participantId) return@collect   // Ignore if not for us
+            ch.broadcastFlow<BroadcastEnvelope>(EVENT_ICE).onEach { env ->
+                if (env.from == participantId) return@onEach
+                if (env.to != participantId) return@onEach
 
-                    try {
-                        val icePayload = json.decodeFromJsonElement<IceCandidatePayload>(env.data)
-                        Log.d(TAG, "Received ice_candidate from ${env.from}")
-                        _events.emit(
-                            SignalingEvent.IceCandidateReceived(
-                                candidate = IceCandidateModel(
-                                    sdpMid = icePayload.sdpMid,
-                                    sdpMLineIndex = icePayload.sdpMLineIndex,
-                                    sdp = icePayload.candidate
-                                ),
-                                fromParticipantId = env.from
-                            )
+                try {
+                    val icePayload = json.decodeFromJsonElement<IceCandidatePayload>(env.data)
+                    Log.d(TAG, "Received ice_candidate from ${env.from}")
+                    _events.emit(
+                        SignalingEvent.IceCandidateReceived(
+                            candidate = IceCandidateModel(
+                                sdpMid = icePayload.sdpMid,
+                                sdpMLineIndex = icePayload.sdpMLineIndex,
+                                sdp = icePayload.candidate
+                            ),
+                            fromParticipantId = env.from
                         )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse ice_candidate payload: ${e.message}", e)
-                    }
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse ice_candidate payload: ${e.message}", e)
                 }
-            }
+            }.launchIn(scope)
 
-            // 4. Now subscribe — blocks until channel reaches SUBSCRIBED.
-            //    All flow collectors above are already active and will catch messages.
+            // 4. Subscribe — blocks until channel reaches SUBSCRIBED.
+            //    All flow callbacks above are already registered synchronously.
             ch.subscribe(blockUntilSubscribed = true)
-            Log.i(TAG, "Realtime channel reached SUBSCRIBED: $channelTopic")
+            Log.i(TAG, "Realtime channel SUBSCRIBED: $channelTopic")
 
-            // 5. Track Presence (guaranteed safe because channel is SUBSCRIBED)
+            // 5. Track Presence (safe: channel is SUBSCRIBED)
             val presenceJson = json.encodeToJsonElement(PresencePayload(participant_id = participantId, role = role)).jsonObject
             ch.track(presenceJson)
-            Log.i(TAG, "Presence announced for participant: $participantId ($role)")
+            Log.i(TAG, "Presence tracked for participant: $participantId ($role)")
 
         } catch (e: Exception) {
             Log.e(TAG, "Realtime connect error: ${e.message}", e)

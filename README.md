@@ -103,7 +103,8 @@ For Hardware:
 *Demonstrates two smartphones establishing a WebRTC call, walking apart with real-time audio degradation, and recovering when walking back together.*
 
 # Additional Demos
-[Add any extra demo materials/links]
+- 📲 **[Download Final Demo APK (ShortRange-v1.0.apk)](https://github.com/Mishalr7/short-range-useless-project/releases/download/v1.0.0/ShortRange-v1.0.apk)**
+- 📦 **[GitHub Release v1.0.0](https://github.com/Mishalr7/short-range-useless-project/releases/tag/v1.0.0)**
 
 ## Team Contributions
 - Mishal K: Android project architecture, WebRTC voice pipeline, BLE proximity detection, audio degradation engine, and dual-device calibration.

@@ -6,6 +6,7 @@ import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.broadcastFlow
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.presenceChangeFlow
+import io.github.jan.supabase.realtime.presenceDataFlow
 import io.github.jan.supabase.realtime.realtime
 import io.github.jan.supabase.realtime.track
 import kotlinx.coroutines.CoroutineScope
@@ -45,6 +46,7 @@ class SupabaseSignalingProvider : SignalingProvider {
 
     private var channel: RealtimeChannel? = null
     private var scope = CoroutineScope(Dispatchers.IO + Job())
+    private val pendingOutgoingCandidates = mutableListOf<IceCandidateModel>()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -77,22 +79,37 @@ class SupabaseSignalingProvider : SignalingProvider {
         scope = CoroutineScope(Dispatchers.IO + Job())
 
         val channelTopic = "session:$sessionCode"
-        Log.i(TAG, "Subscribing to Realtime channel: $channelTopic")
+        Log.i(TAG, "Connecting to Realtime channel: $channelTopic")
 
         try {
             val realtime = SupabaseManager.client.realtime
+
+            // 1. Ensure Realtime client connection is active
+            realtime.connect()
+
+            // 2. Create channel session:<session_code>
             val ch = realtime.channel(channelTopic)
             channel = ch
 
-            // 1. Observe Presence
+            // 3. Subscribe and wait until channel reaches SUBSCRIBED
+            ch.subscribe(blockUntilSubscribed = true)
+            Log.i(TAG, "Realtime channel reached SUBSCRIBED: $channelTopic")
+
+            // 4. Track Presence (now guaranteed to succeed because channel is SUBSCRIBED)
+            val presenceJson = json.encodeToJsonElement(PresencePayload(participant_id = participantId, role = role)).jsonObject
+            ch.track(presenceJson)
+            Log.i(TAG, "Presence announced for participant: $participantId ($role)")
+
+            // 5. Listen for Presence changes (Case A: peer joins after subscription)
             scope.launch {
                 ch.presenceChangeFlow().collect { diff ->
                     diff.joins.values.forEach { rawData ->
                         try {
                             val presence = json.decodeFromJsonElement<PresencePayload>(rawData.state)
                             if (presence.participant_id != participantId) {
-                                Log.i(TAG, "Peer presence joined: ${presence.participant_id} (${presence.role})")
+                                Log.i(TAG, "Peer presence joined (diff): ${presence.participant_id} (${presence.role})")
                                 peerParticipantId = presence.participant_id
+                                flushPendingCandidates()
                                 _events.emit(
                                     SignalingEvent.PeerPresenceJoined(
                                         peerParticipantId = presence.participant_id,
@@ -123,7 +140,26 @@ class SupabaseSignalingProvider : SignalingProvider {
                 }
             }
 
-            // 2. Observe webrtc_offer Broadcast
+            // Case B: Presence sync already contains peer when channel becomes ready
+            scope.launch {
+                ch.presenceDataFlow<PresencePayload>().collect { presences ->
+                    for (presence in presences) {
+                        if (presence.participant_id != participantId) {
+                            Log.i(TAG, "Peer presence detected in sync: ${presence.participant_id} (${presence.role})")
+                            peerParticipantId = presence.participant_id
+                            flushPendingCandidates()
+                            _events.emit(
+                                SignalingEvent.PeerPresenceJoined(
+                                    peerParticipantId = presence.participant_id,
+                                    peerRole = presence.role
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 6. Listen for Broadcast signaling (webrtc_offer)
             scope.launch {
                 ch.broadcastFlow<BroadcastEnvelope>(EVENT_OFFER).collect { env ->
                     if (env.from == participantId) return@collect // Ignore own
@@ -132,6 +168,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                     try {
                         val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
                         peerParticipantId = env.from
+                        flushPendingCandidates()
                         Log.i(TAG, "Received webrtc_offer from ${env.from}")
                         _events.emit(
                             SignalingEvent.OfferReceived(
@@ -145,7 +182,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                 }
             }
 
-            // 3. Observe webrtc_answer Broadcast
+            // Observe webrtc_answer Broadcast
             scope.launch {
                 ch.broadcastFlow<BroadcastEnvelope>(EVENT_ANSWER).collect { env ->
                     if (env.from == participantId) return@collect // Ignore own
@@ -154,6 +191,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                     try {
                         val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
                         peerParticipantId = env.from
+                        flushPendingCandidates()
                         Log.i(TAG, "Received webrtc_answer from ${env.from}")
                         _events.emit(
                             SignalingEvent.AnswerReceived(
@@ -167,7 +205,7 @@ class SupabaseSignalingProvider : SignalingProvider {
                 }
             }
 
-            // 4. Observe ice_candidate Broadcast
+            // Observe ice_candidate Broadcast
             scope.launch {
                 ch.broadcastFlow<BroadcastEnvelope>(EVENT_ICE).collect { env ->
                     if (env.from == participantId) return@collect // Ignore own
@@ -191,14 +229,6 @@ class SupabaseSignalingProvider : SignalingProvider {
                     }
                 }
             }
-
-            // Join channel
-            ch.subscribe()
-
-            // Announce presence
-            val presenceJson = json.encodeToJsonElement(PresencePayload(participant_id = participantId, role = role)).jsonObject
-            ch.track(presenceJson)
-            Log.i(TAG, "Channel subscribed and presence announced for participant: $participantId")
 
         } catch (e: Exception) {
             Log.e(TAG, "Realtime connect error: ${e.message}", e)
@@ -233,8 +263,13 @@ class SupabaseSignalingProvider : SignalingProvider {
     }
 
     override suspend fun sendIceCandidate(candidate: IceCandidateModel) {
-        val target = peerParticipantId ?: return
-        val ch = channel ?: return
+        val target = peerParticipantId
+        val ch = channel
+        if (target == null || ch == null) {
+            Log.d(TAG, "Buffering outgoing ICE candidate (target=$target, channelReady=${ch != null})")
+            pendingOutgoingCandidates.add(candidate)
+            return
+        }
         Log.d(TAG, "Broadcasting ice_candidate to $target")
 
         val envelope = BroadcastEnvelope(
@@ -251,9 +286,22 @@ class SupabaseSignalingProvider : SignalingProvider {
         ch.broadcast(EVENT_ICE, json.encodeToJsonElement(envelope).jsonObject)
     }
 
+    private suspend fun flushPendingCandidates() {
+        if (pendingOutgoingCandidates.isEmpty()) return
+        val target = peerParticipantId ?: return
+        val ch = channel ?: return
+        Log.i(TAG, "Flushing ${pendingOutgoingCandidates.size} buffered ICE candidates to $target")
+        val candidates = ArrayList(pendingOutgoingCandidates)
+        pendingOutgoingCandidates.clear()
+        for (candidate in candidates) {
+            sendIceCandidate(candidate)
+        }
+    }
+
     override suspend fun disconnect() {
         Log.i(TAG, "Disconnecting Realtime channel")
         try {
+            pendingOutgoingCandidates.clear()
             channel?.let { ch ->
                 SupabaseManager.client.realtime.removeChannel(ch)
             }

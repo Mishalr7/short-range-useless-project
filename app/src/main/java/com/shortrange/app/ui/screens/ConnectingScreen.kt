@@ -80,7 +80,6 @@ fun ConnectingScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(TechnicalWhite)
-            .clickable { onConnected() }
     ) {
         IndustrialHeader(
             title = "VOICE CHANNEL",

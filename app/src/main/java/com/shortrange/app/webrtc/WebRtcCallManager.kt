@@ -86,6 +86,7 @@ class WebRtcCallManager private constructor(
 
     private var currentSessionCode: String = ""
     private var currentParticipantId: String = ""
+    private var currentPeerParticipantId: String? = null
     private var isInitiatorRole: Boolean = false
 
     init {
@@ -129,6 +130,7 @@ class WebRtcCallManager private constructor(
 
         currentSessionCode = sessionCode
         currentParticipantId = participantId
+        currentPeerParticipantId = peerParticipantId
         isInitiatorRole = isInitiator
         isRemoteDescriptionSet = false
         isOfferCreated = false
@@ -194,8 +196,19 @@ class WebRtcCallManager private constructor(
         }
 
         peerConnection = factory.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
-            override fun onIceCandidate(candidate: IceCandidate?) {
-                candidate?.let { handleLocalIceCandidate(it) }
+            override fun onIceCandidate(candidate: org.webrtc.IceCandidate?) {
+                candidate?.let { c ->
+                    Log.d(TAG, "Local ICE candidate generated: ${c.sdpMid}")
+                    scope.launch {
+                        signalingProvider.sendIceCandidate(
+                            IceCandidateModel(
+                                sdpMid = c.sdpMid,
+                                sdpMLineIndex = c.sdpMLineIndex,
+                                sdp = c.sdp
+                            )
+                        )
+                    }
+                }
             }
 
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
@@ -240,12 +253,11 @@ class WebRtcCallManager private constructor(
             override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
             override fun onIceConnectionReceivingChange(p0: Boolean) {}
             override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
-            override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
-            override fun onAddStream(p0: MediaStream?) {}
-            override fun onRemoveStream(p0: MediaStream?) {}
-            override fun onDataChannel(p0: DataChannel?) {}
+            override fun onIceCandidatesRemoved(p0: Array<out org.webrtc.IceCandidate>?) {}
+            override fun onAddStream(p0: org.webrtc.MediaStream?) {}
+            override fun onRemoveStream(p0: org.webrtc.MediaStream?) {}
+            override fun onDataChannel(p0: org.webrtc.DataChannel?) {}
             override fun onRenegotiationNeeded() {}
-            override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
         })
 
         // Add local audio track to PeerConnection
@@ -260,7 +272,8 @@ class WebRtcCallManager private constructor(
             signalingProvider.events.collect { event ->
                 when (event) {
                     is SignalingEvent.PeerPresenceJoined -> {
-                        Log.i(TAG, "Peer presence detected: ${event.peerParticipantId}. isInitiator=$isInitiatorRole")
+                        currentPeerParticipantId = event.peerParticipantId
+                        Log.i(TAG, "Peer presence detected: ${event.peerParticipantId}. isInitiator=$isInitiatorRole, isOfferCreated=$isOfferCreated")
                         if (isInitiatorRole && !isOfferCreated) {
                             createOffer()
                         }
@@ -289,6 +302,10 @@ class WebRtcCallManager private constructor(
     }
 
     private fun createOffer() {
+        if (isOfferCreated) {
+            Log.w(TAG, "createOffer called but offer has already been created. Ignoring duplicate.")
+            return
+        }
         isOfferCreated = true
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))

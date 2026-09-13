@@ -381,7 +381,7 @@ class RealBleProximityProvider(
         // Extract session code and sender token
         val targetCode = targetSessionCode?.trim()
         if (serviceData.isNotEmpty()) {
-            val hasToken = serviceData.size > 7
+            val hasToken = serviceData.size > 1
             val senderToken = if (hasToken) serviceData[serviceData.size - 1] else null
             val codeBytes = if (hasToken) serviceData.copyOfRange(0, serviceData.size - 1) else serviceData
             val packetCode = String(codeBytes, StandardCharsets.UTF_8).trim()

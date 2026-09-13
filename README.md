@@ -107,7 +107,7 @@ For Hardware:
 
 ## Team Contributions
 - Mishal K: Android project architecture, WebRTC voice pipeline, BLE proximity detection, audio degradation engine, and dual-device calibration.
-- Mohammad Afsal M: Supabase Realtime signaling, UI/UX implementation, session synchronization, testing protocols, and demo coordination.
+- Mohammad Afsal M: Protocol & architectural research on WebRTC voice streaming & BLE RSSI proximity attenuation models, Supabase Realtime signaling, UI/UX implementation, session synchronization, testing protocols, and demo coordination.
 
 ---
 Made with ❤️ at TinkerHub Useless Projects 

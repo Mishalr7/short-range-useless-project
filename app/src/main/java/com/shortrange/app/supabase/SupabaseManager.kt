@@ -9,6 +9,7 @@ import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.realtime.Realtime
 import io.github.jan.supabase.realtime.realtime
+import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -32,6 +33,7 @@ object SupabaseManager {
             supabaseUrl = BuildConfig.SUPABASE_URL,
             supabaseKey = BuildConfig.SUPABASE_ANON_KEY
         ) {
+            httpEngine = OkHttp.create()
             install(Postgrest)
             install(Realtime)
         }

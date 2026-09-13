@@ -10,9 +10,11 @@ import com.shortrange.app.webrtc.signaling.SupabaseSignalingProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
@@ -59,6 +61,11 @@ class WebRtcCallManager private constructor(
         fun getInstance(): WebRtcCallManager {
             return instance ?: error("WebRtcCallManager must be initialized with Context first.")
         }
+
+        private fun extractCandidateType(sdp: String): String {
+            val match = Regex("""\btyp\s+(\w+)""").find(sdp)
+            return match?.groupValues?.get(1)?.lowercase() ?: "unknown"
+        }
     }
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -74,6 +81,8 @@ class WebRtcCallManager private constructor(
     private val earlyIceCandidates = CopyOnWriteArrayList<IceCandidate>()
     private var isRemoteDescriptionSet = false
     private var isOfferCreated = false
+    private var lastLocalOfferSdp: String? = null
+    private var offerResendJob: Job? = null
 
     private var scope = CoroutineScope(Dispatchers.Default + Job())
     private var signalingJob: Job? = null
@@ -134,6 +143,7 @@ class WebRtcCallManager private constructor(
         isInitiatorRole = isInitiator
         isRemoteDescriptionSet = false
         isOfferCreated = false
+        lastLocalOfferSdp = null
         earlyIceCandidates.clear()
 
         _callState.value = CallState.CONNECTING
@@ -161,6 +171,11 @@ class WebRtcCallManager private constructor(
         scope.launch {
             signalingProvider.connect()
         }
+
+        // 4. If Host, initiate offer creation immediately
+        if (isInitiator) {
+            createOffer()
+        }
     }
 
     private fun createLocalAudioTrack() {
@@ -179,7 +194,7 @@ class WebRtcCallManager private constructor(
         track.setEnabled(!_isMuted.value)
         localAudioTrack = track
 
-        Log.i(TAG, "Local AudioTrack created and enabled: ${!_isMuted.value}")
+        Log.i(TAG, "LOCAL_AUDIO_TRACK_CREATED: id=${track.id()}, enabled=${track.enabled()}")
     }
 
     private fun createPeerConnection() {
@@ -198,11 +213,12 @@ class WebRtcCallManager private constructor(
         peerConnection = factory.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
             override fun onIceCandidate(candidate: org.webrtc.IceCandidate?) {
                 candidate?.let { c ->
-                    Log.d(TAG, "Local ICE candidate generated: ${c.sdpMid}")
+                    val type = extractCandidateType(c.sdp)
+                    Log.i(TAG, "ICE_CANDIDATE_CREATED: mid=${c.sdpMid}, type=$type, candidate=${c.sdp}")
                     scope.launch {
                         signalingProvider.sendIceCandidate(
                             IceCandidateModel(
-                                sdpMid = c.sdpMid,
+                                sdpMid = c.sdpMid ?: "0",
                                 sdpMLineIndex = c.sdpMLineIndex,
                                 sdp = c.sdp
                             )
@@ -212,11 +228,12 @@ class WebRtcCallManager private constructor(
             }
 
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
-                Log.i(TAG, "WebRTC IceConnectionState: $newState")
+                Log.i(TAG, "ICE_STATE: $newState")
                 when (newState) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED -> {
                         _callState.value = CallState.CONNECTED
+                        offerResendJob?.cancel()
                     }
                     PeerConnection.IceConnectionState.DISCONNECTED -> {
                         Log.w(TAG, "WebRTC IceConnectionState DISCONNECTED")
@@ -224,18 +241,28 @@ class WebRtcCallManager private constructor(
                     PeerConnection.IceConnectionState.FAILED -> {
                         Log.e(TAG, "WebRTC IceConnectionState FAILED")
                         _callState.value = CallState.FAILED
+                        offerResendJob?.cancel()
                     }
                     else -> Unit
                 }
             }
 
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
-                Log.i(TAG, "WebRTC PeerConnectionState: $newState")
+                Log.i(TAG, "PEER_CONNECTION_STATE: $newState")
                 when (newState) {
-                    PeerConnection.PeerConnectionState.CONNECTED -> _callState.value = CallState.CONNECTED
-                    PeerConnection.PeerConnectionState.FAILED -> _callState.value = CallState.FAILED
+                    PeerConnection.PeerConnectionState.CONNECTED -> {
+                        _callState.value = CallState.CONNECTED
+                        offerResendJob?.cancel()
+                    }
+                    PeerConnection.PeerConnectionState.FAILED -> {
+                        _callState.value = CallState.FAILED
+                        offerResendJob?.cancel()
+                    }
                     PeerConnection.PeerConnectionState.DISCONNECTED,
-                    PeerConnection.PeerConnectionState.CLOSED -> _callState.value = CallState.DISCONNECTED
+                    PeerConnection.PeerConnectionState.CLOSED -> {
+                        _callState.value = CallState.DISCONNECTED
+                        offerResendJob?.cancel()
+                    }
                     else -> Unit
                 }
             }
@@ -243,7 +270,7 @@ class WebRtcCallManager private constructor(
             override fun onTrack(transceiver: RtpTransceiver?) {
                 val track = transceiver?.receiver?.track()
                 if (track is AudioTrack) {
-                    Log.i(TAG, "Remote AudioTrack received via Unified Plan")
+                    Log.i(TAG, "REMOTE_AUDIO_TRACK_RECEIVED: id=${track.id()}, enabled=${track.enabled()}")
                     remoteAudioTrack = track
                     track.setEnabled(true)
                     track.setVolume(1.0)
@@ -274,8 +301,14 @@ class WebRtcCallManager private constructor(
                     is SignalingEvent.PeerPresenceJoined -> {
                         currentPeerParticipantId = event.peerParticipantId
                         Log.i(TAG, "Peer presence detected: ${event.peerParticipantId}. isInitiator=$isInitiatorRole, isOfferCreated=$isOfferCreated")
-                        if (isInitiatorRole && !isOfferCreated) {
-                            createOffer()
+                        if (isInitiatorRole) {
+                            if (!isOfferCreated) {
+                                createOffer()
+                            } else if (lastLocalOfferSdp != null && !isRemoteDescriptionSet) {
+                                scope.launch {
+                                    signalingProvider.sendOffer(lastLocalOfferSdp!!)
+                                }
+                            }
                         }
                     }
                     is SignalingEvent.OfferReceived -> {
@@ -315,13 +348,21 @@ class WebRtcCallManager private constructor(
         peerConnection?.createOffer(object : SdpObserver {
             override fun onCreateSuccess(desc: SessionDescription?) {
                 desc?.let { sdp ->
-                    Log.i(TAG, "Offer SDP created successfully")
+                    lastLocalOfferSdp = sdp.description
+                    Log.i(TAG, "OFFER_CREATED: type=${sdp.type}, sdpLength=${sdp.description.length}")
                     peerConnection?.setLocalDescription(object : SdpObserver {
                         override fun onCreateSuccess(p0: SessionDescription?) {}
                         override fun onSetSuccess() {
-                            Log.i(TAG, "Local description set with Offer")
-                            scope.launch {
-                                signalingProvider.sendOffer(sdp.description)
+                            Log.i(TAG, "LOCAL_OFFER_SET: successfully set local description for offer")
+                            // Start resilient resend loop until answer is applied or connected
+                            offerResendJob?.cancel()
+                            offerResendJob = scope.launch {
+                                var attempt = 1
+                                while (isActive && !isRemoteDescriptionSet && _callState.value != CallState.CONNECTED && attempt <= 12) {
+                                    signalingProvider.sendOffer(sdp.description)
+                                    delay(2500)
+                                    attempt++
+                                }
                             }
                         }
                         override fun onCreateFailure(p0: String?) {}
@@ -345,7 +386,7 @@ class WebRtcCallManager private constructor(
         peerConnection?.setRemoteDescription(object : SdpObserver {
             override fun onCreateSuccess(p0: SessionDescription?) {}
             override fun onSetSuccess() {
-                Log.i(TAG, "Remote Offer SDP set successfully")
+                Log.i(TAG, "REMOTE_OFFER_SET: remote offer description applied")
                 isRemoteDescriptionSet = true
                 drainEarlyIceCandidates()
                 createAnswer()
@@ -366,11 +407,11 @@ class WebRtcCallManager private constructor(
         peerConnection?.createAnswer(object : SdpObserver {
             override fun onCreateSuccess(desc: SessionDescription?) {
                 desc?.let { sdp ->
-                    Log.i(TAG, "Answer SDP created successfully")
+                    Log.i(TAG, "ANSWER_CREATED: type=${sdp.type}, sdpLength=${sdp.description.length}")
                     peerConnection?.setLocalDescription(object : SdpObserver {
                         override fun onCreateSuccess(p0: SessionDescription?) {}
                         override fun onSetSuccess() {
-                            Log.i(TAG, "Local description set with Answer")
+                            Log.i(TAG, "LOCAL_ANSWER_SET: successfully set local description for answer")
                             scope.launch {
                                 signalingProvider.sendAnswer(sdp.description)
                             }
@@ -396,8 +437,10 @@ class WebRtcCallManager private constructor(
         peerConnection?.setRemoteDescription(object : SdpObserver {
             override fun onCreateSuccess(p0: SessionDescription?) {}
             override fun onSetSuccess() {
-                Log.i(TAG, "Remote Answer SDP set successfully")
+                Log.i(TAG, "REMOTE_ANSWER_SET: remote answer description applied")
                 isRemoteDescriptionSet = true
+                offerResendJob?.cancel()
+                offerResendJob = null
                 drainEarlyIceCandidates()
             }
             override fun onCreateFailure(p0: String?) {}
@@ -411,7 +454,7 @@ class WebRtcCallManager private constructor(
         scope.launch {
             signalingProvider.sendIceCandidate(
                 IceCandidateModel(
-                    sdpMid = candidate.sdpMid,
+                    sdpMid = candidate.sdpMid ?: "0",
                     sdpMLineIndex = candidate.sdpMLineIndex,
                     sdp = candidate.sdp
                 )
@@ -420,17 +463,22 @@ class WebRtcCallManager private constructor(
     }
 
     private fun handleRemoteIceCandidate(model: IceCandidateModel) {
-        val rtcCandidate = IceCandidate(model.sdpMid, model.sdpMLineIndex, model.sdp)
+        val rtcCandidate = IceCandidate(model.sdpMid ?: "0", model.sdpMLineIndex, model.sdp)
         if (isRemoteDescriptionSet) {
-            peerConnection?.addIceCandidate(rtcCandidate)
+            val added = peerConnection?.addIceCandidate(rtcCandidate) ?: false
+            val type = extractCandidateType(rtcCandidate.sdp)
+            Log.i(TAG, "ICE_CANDIDATE_ADDED: mid=${rtcCandidate.sdpMid}, type=$type, success=$added")
         } else {
             earlyIceCandidates.add(rtcCandidate)
+            Log.d(TAG, "Buffered early ICE candidate: mid=${rtcCandidate.sdpMid}")
         }
     }
 
     private fun drainEarlyIceCandidates() {
         for (candidate in earlyIceCandidates) {
-            peerConnection?.addIceCandidate(candidate)
+            val added = peerConnection?.addIceCandidate(candidate) ?: false
+            val type = extractCandidateType(candidate.sdp)
+            Log.i(TAG, "ICE_CANDIDATE_ADDED: mid=${candidate.sdpMid}, type=$type, drained=true, success=$added")
         }
         earlyIceCandidates.clear()
     }
@@ -457,6 +505,10 @@ class WebRtcCallManager private constructor(
 
     fun endCall() {
         Log.i(TAG, "Ending WebRTC call and releasing resources")
+        offerResendJob?.cancel()
+        offerResendJob = null
+        lastLocalOfferSdp = null
+
         signalingJob?.cancel()
         signalingJob = null
 

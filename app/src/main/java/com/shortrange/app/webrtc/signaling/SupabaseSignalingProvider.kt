@@ -19,10 +19,17 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 /**
  * Concrete implementation of SignalingProvider using Supabase Realtime Channels (Presence & Broadcast).
@@ -35,6 +42,19 @@ class SupabaseSignalingProvider : SignalingProvider {
         private const val EVENT_OFFER = "webrtc_offer"
         private const val EVENT_ANSWER = "webrtc_answer"
         private const val EVENT_ICE = "ice_candidate"
+
+        private fun extractCandidateType(sdp: String): String {
+            val match = Regex("""\btyp\s+(\w+)""").find(sdp)
+            return match?.groupValues?.get(1)?.lowercase() ?: "unknown"
+        }
+
+        private fun JsonObject.getStringOrNull(key: String): String? {
+            return (this[key] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+        }
+
+        private fun JsonObject.getIntOrNull(key: String): Int? {
+            return (this[key] as? JsonPrimitive)?.content?.toIntOrNull()
+        }
     }
 
     private val _events = MutableSharedFlow<SignalingEvent>(extraBufferCapacity = 64)
@@ -64,9 +84,9 @@ class SupabaseSignalingProvider : SignalingProvider {
         isInitiator: Boolean
     ) {
         this.sessionCode = sessionCode.trim().uppercase()
-        this.participantId = participantId
-        this.peerParticipantId = peerParticipantId
-        this.role = role
+        this.participantId = participantId.trim()
+        this.peerParticipantId = peerParticipantId?.trim()
+        this.role = role.trim()
         this.isInitiator = isInitiator
         Log.i(TAG, "Initialized: session=$sessionCode, participant=$participantId, role=$role, isInitiator=$isInitiator")
     }
@@ -89,28 +109,43 @@ class SupabaseSignalingProvider : SignalingProvider {
             // 1. Ensure Realtime WebSocket connection is active
             realtime.connect()
 
-            // 2. Create the channel
-            val ch = realtime.channel(channelTopic)
+            // 2. Create the channel with explicit presence key and broadcast config
+            val ch = realtime.channel(channelTopic) {
+                presence {
+                    key = participantId
+                }
+                broadcast {
+                    receiveOwnBroadcasts = false
+                    acknowledgeBroadcasts = true
+                }
+            }
             channel = ch
 
-            // 3. Create all Flow references NOW (on this coroutine context).
-            //    This registers internal callbacks inside the channel immediately.
-            //    Then launch collection via .onEach{}.launchIn(scope).
-            //    (Following the official supabase-kt docs pattern exactly.)
+            // 3. Register flow collectors before subscribing
 
-            // Presence diff flow (Case A: peer joins/leaves after us)
+            // Presence diff flow: detect peer joins & leaves
             ch.presenceChangeFlow().onEach { diff ->
-                diff.joins.values.forEach { rawData ->
+                diff.joins.forEach { (rawKey, rawData) ->
                     try {
-                        val presence = json.decodeFromJsonElement<PresencePayload>(rawData.state)
-                        if (presence.participant_id != participantId) {
-                            Log.i(TAG, "Peer presence joined (diff): ${presence.participant_id} (${presence.role})")
-                            peerParticipantId = presence.participant_id
+                        val key = rawKey.toString()
+                        val stateParticipantId = rawData.state.getStringOrNull("participant_id")
+                            ?: rawData.state.getStringOrNull("participantId")
+                        val stateRole = rawData.state.getStringOrNull("role") ?: "PEER"
+
+                        val peerId = when {
+                            !stateParticipantId.isNullOrBlank() && !stateParticipantId.equals(participantId, ignoreCase = true) -> stateParticipantId
+                            key.isNotBlank() && !key.equals(participantId, ignoreCase = true) -> key
+                            else -> null
+                        }
+
+                        if (peerId != null) {
+                            Log.i(TAG, "Peer presence joined: $peerId ($stateRole)")
+                            peerParticipantId = peerId
                             flushPendingCandidates()
                             _events.emit(
                                 SignalingEvent.PeerPresenceJoined(
-                                    peerParticipantId = presence.participant_id,
-                                    peerRole = presence.role
+                                    peerParticipantId = peerId,
+                                    peerRole = stateRole
                                 )
                             )
                         }
@@ -119,112 +154,157 @@ class SupabaseSignalingProvider : SignalingProvider {
                     }
                 }
 
-                diff.leaves.values.forEach { rawData ->
-                    try {
-                        val presence = json.decodeFromJsonElement<PresencePayload>(rawData.state)
-                        if (presence.participant_id != participantId) {
-                            Log.i(TAG, "Peer presence left: ${presence.participant_id}")
-                            _events.emit(
-                                SignalingEvent.PeerPresenceLeft(
-                                    peerParticipantId = presence.participant_id
-                                )
+                diff.leaves.forEach { (rawKey, rawData) ->
+                    val key = rawKey.toString()
+                    val stateParticipantId = rawData.state.getStringOrNull("participant_id")
+                    val peerId = stateParticipantId ?: key
+                    if (peerId.isNotBlank() && !peerId.equals(participantId, ignoreCase = true)) {
+                        Log.w(TAG, "Peer presence left: $peerId")
+                        _events.emit(
+                            SignalingEvent.PeerPresenceLeft(
+                                peerParticipantId = peerId
                             )
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to parse presence leave: ${e.message}")
+                        )
                     }
                 }
             }.launchIn(scope)
 
-            // Presence data flow (Case B: peer already present when we join)
-            ch.presenceDataFlow<PresencePayload>().onEach { presences ->
+            // Presence data flow (peer already present in channel)
+            ch.presenceDataFlow<JsonObject>().onEach { presences ->
                 for (presence in presences) {
-                    if (presence.participant_id != participantId) {
-                        Log.i(TAG, "Peer presence detected in sync: ${presence.participant_id} (${presence.role})")
-                        peerParticipantId = presence.participant_id
+                    val pId = presence.getStringOrNull("participant_id") ?: presence.getStringOrNull("participantId")
+                    val pRole = presence.getStringOrNull("role") ?: "PEER"
+                    if (!pId.isNullOrBlank() && !pId.equals(participantId, ignoreCase = true)) {
+                        Log.i(TAG, "Peer presence detected in sync: $pId ($pRole)")
+                        peerParticipantId = pId
                         flushPendingCandidates()
                         _events.emit(
                             SignalingEvent.PeerPresenceJoined(
-                                peerParticipantId = presence.participant_id,
-                                peerRole = presence.role
+                                peerParticipantId = pId,
+                                peerRole = pRole
                             )
                         )
                     }
                 }
             }.launchIn(scope)
 
-            // Broadcast: webrtc_offer
-            ch.broadcastFlow<BroadcastEnvelope>(EVENT_OFFER).onEach { env ->
-                if (env.from == participantId) return@onEach
-                if (env.to != participantId) return@onEach
-
+            // Broadcast: webrtc_offer (using JsonObject to avoid any silent deserialization failure)
+            ch.broadcastFlow<JsonObject>(EVENT_OFFER).onEach { obj ->
                 try {
-                    val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
-                    peerParticipantId = env.from
-                    flushPendingCandidates()
-                    Log.i(TAG, "Received webrtc_offer from ${env.from}")
-                    _events.emit(
-                        SignalingEvent.OfferReceived(
-                            sdp = sdpPayload.sdp,
-                            fromParticipantId = env.from
+                    val from = obj.getStringOrNull("from") ?: return@onEach
+                    val to = obj.getStringOrNull("to") ?: ""
+                    val data = obj["data"]?.jsonObject ?: return@onEach
+
+                    Log.d(TAG, "RAW_BROADCAST: $EVENT_OFFER from=$from to=$to")
+
+                    if (from.trim().equals(participantId.trim(), ignoreCase = true)) return@onEach
+                    if (to.isNotBlank() && !to.trim().equals(participantId.trim(), ignoreCase = true)) {
+                        Log.d(TAG, "Ignoring $EVENT_OFFER meant for $to (my id is $participantId)")
+                        return@onEach
+                    }
+
+                    val sdp = data.getStringOrNull("sdp") ?: ""
+                    if (sdp.isNotBlank()) {
+                        Log.i(TAG, "OFFER_RECEIVED: from=$from, to=$to")
+                        peerParticipantId = from
+                        flushPendingCandidates()
+                        _events.emit(
+                            SignalingEvent.OfferReceived(
+                                sdp = sdp,
+                                fromParticipantId = from
+                            )
                         )
-                    )
+                    }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse webrtc_offer payload: ${e.message}", e)
+                    Log.e(TAG, "Error processing $EVENT_OFFER: ${e.message}", e)
                 }
             }.launchIn(scope)
 
             // Broadcast: webrtc_answer
-            ch.broadcastFlow<BroadcastEnvelope>(EVENT_ANSWER).onEach { env ->
-                if (env.from == participantId) return@onEach
-                if (env.to != participantId) return@onEach
-
+            ch.broadcastFlow<JsonObject>(EVENT_ANSWER).onEach { obj ->
                 try {
-                    val sdpPayload = json.decodeFromJsonElement<SdpPayload>(env.data)
-                    peerParticipantId = env.from
-                    flushPendingCandidates()
-                    Log.i(TAG, "Received webrtc_answer from ${env.from}")
-                    _events.emit(
-                        SignalingEvent.AnswerReceived(
-                            sdp = sdpPayload.sdp,
-                            fromParticipantId = env.from
+                    val from = obj.getStringOrNull("from") ?: return@onEach
+                    val to = obj.getStringOrNull("to") ?: ""
+                    val data = obj["data"]?.jsonObject ?: return@onEach
+
+                    Log.d(TAG, "RAW_BROADCAST: $EVENT_ANSWER from=$from to=$to")
+
+                    if (from.trim().equals(participantId.trim(), ignoreCase = true)) return@onEach
+                    if (to.isNotBlank() && !to.trim().equals(participantId.trim(), ignoreCase = true)) {
+                        Log.d(TAG, "Ignoring $EVENT_ANSWER meant for $to (my id is $participantId)")
+                        return@onEach
+                    }
+
+                    val sdp = data.getStringOrNull("sdp") ?: ""
+                    if (sdp.isNotBlank()) {
+                        Log.i(TAG, "ANSWER_RECEIVED: from=$from, to=$to")
+                        peerParticipantId = from
+                        flushPendingCandidates()
+                        _events.emit(
+                            SignalingEvent.AnswerReceived(
+                                sdp = sdp,
+                                fromParticipantId = from
+                            )
                         )
-                    )
+                    }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse webrtc_answer payload: ${e.message}", e)
+                    Log.e(TAG, "Error processing $EVENT_ANSWER: ${e.message}", e)
                 }
             }.launchIn(scope)
 
             // Broadcast: ice_candidate
-            ch.broadcastFlow<BroadcastEnvelope>(EVENT_ICE).onEach { env ->
-                if (env.from == participantId) return@onEach
-                if (env.to != participantId) return@onEach
-
+            ch.broadcastFlow<JsonObject>(EVENT_ICE).onEach { obj ->
                 try {
-                    val icePayload = json.decodeFromJsonElement<IceCandidatePayload>(env.data)
-                    Log.d(TAG, "Received ice_candidate from ${env.from}")
-                    _events.emit(
-                        SignalingEvent.IceCandidateReceived(
-                            candidate = IceCandidateModel(
-                                sdpMid = icePayload.sdpMid,
-                                sdpMLineIndex = icePayload.sdpMLineIndex,
-                                sdp = icePayload.candidate
-                            ),
-                            fromParticipantId = env.from
+                    val from = obj.getStringOrNull("from") ?: return@onEach
+                    val to = obj.getStringOrNull("to") ?: ""
+                    val data = obj["data"]?.jsonObject ?: return@onEach
+
+                    if (from.trim().equals(participantId.trim(), ignoreCase = true)) return@onEach
+                    if (to.isNotBlank() && !to.trim().equals(participantId.trim(), ignoreCase = true)) {
+                        return@onEach
+                    }
+
+                    val candidate = data.getStringOrNull("candidate") ?: ""
+                    val sdpMid = data.getStringOrNull("sdpMid")
+                    val sdpMLineIndex = data.getIntOrNull("sdpMLineIndex") ?: 0
+
+                    if (candidate.isNotBlank()) {
+                        val type = extractCandidateType(candidate)
+                        Log.i(TAG, "ICE_CANDIDATE_RECEIVED: from=$from, mid=$sdpMid, type=$type")
+                        _events.emit(
+                            SignalingEvent.IceCandidateReceived(
+                                candidate = IceCandidateModel(
+                                    sdpMid = sdpMid,
+                                    sdpMLineIndex = sdpMLineIndex,
+                                    sdp = candidate
+                                ),
+                                fromParticipantId = from
+                            )
                         )
-                    )
+                    }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse ice_candidate payload: ${e.message}", e)
+                    Log.e(TAG, "Error processing $EVENT_ICE: ${e.message}", e)
                 }
             }.launchIn(scope)
 
-            // 4. Subscribe — blocks until channel reaches SUBSCRIBED.
-            //    All flow callbacks above are already registered synchronously.
-            ch.subscribe(blockUntilSubscribed = true)
-            Log.i(TAG, "Realtime channel SUBSCRIBED: $channelTopic")
+            // 4. Subscribe — blocks until channel reaches SUBSCRIBED or times out
+            val subscribed = withTimeoutOrNull(10000L) {
+                ch.subscribe(blockUntilSubscribed = true)
+                true
+            } ?: false
 
-            // 5. Track Presence (safe: channel is SUBSCRIBED)
-            val presenceJson = json.encodeToJsonElement(PresencePayload(participant_id = participantId, role = role)).jsonObject
+            if (subscribed) {
+                Log.i(TAG, "Realtime channel SUBSCRIBED: $channelTopic")
+            } else {
+                Log.w(TAG, "Channel subscribe timed out for $channelTopic, falling back to non-blocking subscribe")
+                ch.subscribe(blockUntilSubscribed = false)
+            }
+
+            // 5. Track Presence
+            val presenceJson = buildJsonObject {
+                put("participant_id", participantId)
+                put("role", role)
+            }
             ch.track(presenceJson)
             Log.i(TAG, "Presence tracked for participant: $participantId ($role)")
 
@@ -235,29 +315,35 @@ class SupabaseSignalingProvider : SignalingProvider {
     }
 
     override suspend fun sendOffer(sdp: String) {
-        val target = peerParticipantId ?: return
         val ch = channel ?: return
-        Log.i(TAG, "Broadcasting webrtc_offer to $target")
+        val target = peerParticipantId ?: ""
+        Log.i(TAG, "OFFER_SENT: to=$target, sdpLength=${sdp.length}")
 
-        val envelope = BroadcastEnvelope(
-            from = participantId,
-            to = target,
-            data = json.encodeToJsonElement(SdpPayload(type = "offer", sdp = sdp)).jsonObject
-        )
-        ch.broadcast(EVENT_OFFER, json.encodeToJsonElement(envelope).jsonObject)
+        val envelope = buildJsonObject {
+            put("from", participantId)
+            put("to", target)
+            put("data", buildJsonObject {
+                put("type", "offer")
+                put("sdp", sdp)
+            })
+        }
+        ch.broadcast(EVENT_OFFER, envelope)
     }
 
     override suspend fun sendAnswer(sdp: String) {
-        val target = peerParticipantId ?: return
         val ch = channel ?: return
-        Log.i(TAG, "Broadcasting webrtc_answer to $target")
+        val target = peerParticipantId ?: ""
+        Log.i(TAG, "ANSWER_SENT: to=$target, sdpLength=${sdp.length}")
 
-        val envelope = BroadcastEnvelope(
-            from = participantId,
-            to = target,
-            data = json.encodeToJsonElement(SdpPayload(type = "answer", sdp = sdp)).jsonObject
-        )
-        ch.broadcast(EVENT_ANSWER, json.encodeToJsonElement(envelope).jsonObject)
+        val envelope = buildJsonObject {
+            put("from", participantId)
+            put("to", target)
+            put("data", buildJsonObject {
+                put("type", "answer")
+                put("sdp", sdp)
+            })
+        }
+        ch.broadcast(EVENT_ANSWER, envelope)
     }
 
     override suspend fun sendIceCandidate(candidate: IceCandidateModel) {
@@ -268,20 +354,20 @@ class SupabaseSignalingProvider : SignalingProvider {
             pendingOutgoingCandidates.add(candidate)
             return
         }
-        Log.d(TAG, "Broadcasting ice_candidate to $target")
 
-        val envelope = BroadcastEnvelope(
-            from = participantId,
-            to = target,
-            data = json.encodeToJsonElement(
-                IceCandidatePayload(
-                    candidate = candidate.sdp,
-                    sdpMid = candidate.sdpMid,
-                    sdpMLineIndex = candidate.sdpMLineIndex
-                )
-            ).jsonObject
-        )
-        ch.broadcast(EVENT_ICE, json.encodeToJsonElement(envelope).jsonObject)
+        val type = extractCandidateType(candidate.sdp)
+        Log.i(TAG, "ICE_CANDIDATE_SENT: to=$target, mid=${candidate.sdpMid}, type=$type")
+
+        val envelope = buildJsonObject {
+            put("from", participantId)
+            put("to", target)
+            put("data", buildJsonObject {
+                put("candidate", candidate.sdp)
+                if (candidate.sdpMid != null) put("sdpMid", candidate.sdpMid)
+                put("sdpMLineIndex", candidate.sdpMLineIndex)
+            })
+        }
+        ch.broadcast(EVENT_ICE, envelope)
     }
 
     private suspend fun flushPendingCandidates() {

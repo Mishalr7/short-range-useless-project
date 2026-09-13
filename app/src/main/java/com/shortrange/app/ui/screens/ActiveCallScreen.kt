@@ -94,13 +94,20 @@ fun ActiveCallScreen(
         }
     }
 
-    // Monitor Proximity Lost transition once call has been active
-    LaunchedEffect(webrtcCallState, proximityTelemetry.zone, proximityTelemetry.isPeerPresent) {
+    // Monitor connection establishment
+    LaunchedEffect(webrtcCallState, proximityTelemetry.isPeerPresent) {
         if (webrtcCallState == com.shortrange.app.webrtc.CallState.CONNECTED && (proximityTelemetry.isPeerPresent || proximityEngine.isSimulating())) {
             hasEstablishedConnection = true
         }
+    }
+
+    // Monitor Proximity Lost transition: allow 12-second window for temporary loss and recovery
+    LaunchedEffect(hasEstablishedConnection, proximityTelemetry.zone) {
         if (hasEstablishedConnection && proximityTelemetry.zone == ProximityZone.LOST) {
-            onFaultOccurred(FaultType.PROXIMITY_FAULT_04)
+            delay(12000L)
+            if (proximityTelemetry.zone == ProximityZone.LOST) {
+                onFaultOccurred(FaultType.PROXIMITY_FAULT_04)
+            }
         }
     }
 

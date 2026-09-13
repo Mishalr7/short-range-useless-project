@@ -19,6 +19,9 @@ import com.shortrange.app.ui.screens.CreateSessionScreen
 import com.shortrange.app.ui.screens.HomeScreen
 import com.shortrange.app.ui.screens.JoinSessionScreen
 import com.shortrange.app.ui.screens.SplashScreen
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 @Composable
 fun ShortRangeNavHost(
@@ -121,6 +124,9 @@ fun ShortRangeNavHost(
             ActiveCallScreen(
                 onEndCallClick = {
                     com.shortrange.app.webrtc.WebRtcCallManager.getInstance().endCall()
+                    CoroutineScope(Dispatchers.IO).launch {
+                        com.shortrange.app.supabase.SupabaseManager.leaveSession()
+                    }
                     com.shortrange.app.supabase.SupabaseManager.clearSession()
                     ProximityEngine.getInstance().resetSession()
                     navController.navigate(Screen.Home.route) {
@@ -129,6 +135,9 @@ fun ShortRangeNavHost(
                 },
                 onFaultOccurred = { fault ->
                     com.shortrange.app.webrtc.WebRtcCallManager.getInstance().endCall()
+                    CoroutineScope(Dispatchers.IO).launch {
+                        com.shortrange.app.supabase.SupabaseManager.leaveSession()
+                    }
                     navController.navigate(Screen.CommunicationLost.createRoute(fault.name))
                 }
             )
@@ -149,6 +158,9 @@ fun ShortRangeNavHost(
                 faultType = faultType,
                 onReturnHomeClick = {
                     com.shortrange.app.webrtc.WebRtcCallManager.getInstance().endCall()
+                    CoroutineScope(Dispatchers.IO).launch {
+                        com.shortrange.app.supabase.SupabaseManager.leaveSession()
+                    }
                     com.shortrange.app.supabase.SupabaseManager.clearSession()
                     ProximityEngine.getInstance().resetSession()
                     navController.navigate(Screen.Home.route) {

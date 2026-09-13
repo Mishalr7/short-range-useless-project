@@ -99,7 +99,9 @@ For Hardware:
 
 ### Project Demo
 # Video
-[Add your demo video link here]
+[![Watch the Demo Video](https://img.shields.io/badge/YouTube-Watch%20Demo%20Video-red?style=for-the-badge&logo=youtube)](https://youtu.be/neRT0q40-W8)
+
+[Direct Link: https://youtu.be/neRT0q40-W8](https://youtu.be/neRT0q40-W8)
 *Demonstrates two smartphones establishing a WebRTC call, walking apart with real-time audio degradation, and recovering when walking back together.*
 
 # Additional Demos

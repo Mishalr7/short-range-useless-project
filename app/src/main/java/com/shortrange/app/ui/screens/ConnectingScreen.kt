@@ -20,6 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +39,8 @@ import com.shortrange.app.ui.theme.LightBorder
 import com.shortrange.app.ui.theme.PrimaryBlack
 import com.shortrange.app.ui.theme.TechnicalWhite
 import com.shortrange.app.ui.theme.TelemetryGreen
+import com.shortrange.app.webrtc.CallState
+import com.shortrange.app.webrtc.WebRtcCallManager
 import kotlinx.coroutines.delay
 
 @Composable
@@ -45,23 +48,32 @@ fun ConnectingScreen(
     onBackClick: () -> Unit,
     onConnected: () -> Unit
 ) {
+    val callState by WebRtcCallManager.getInstance().callState.collectAsState()
     var checkStep by remember { mutableIntStateOf(1) }
 
     val checkItems = listOf(
         "SIGNALING",
         "PARTICIPANT CONNECTION",
-        "PROXIMITY LINK (BLE)",
+        "WEBRTC CONNECTION",
         "AUDIO INPUT",
         "AUDIO OUTPUT"
     )
 
-    LaunchedEffect(Unit) {
-        for (i in 1..checkItems.size) {
-            delay(400)
-            checkStep = i
+    LaunchedEffect(callState) {
+        when (callState) {
+            com.shortrange.app.webrtc.CallState.CONNECTING -> {
+                checkStep = 2
+            }
+            com.shortrange.app.webrtc.CallState.CONNECTED -> {
+                checkStep = 5
+                delay(400)
+                onConnected()
+            }
+            com.shortrange.app.webrtc.CallState.FAILED -> {
+                checkStep = 1
+            }
+            else -> Unit
         }
-        delay(600)
-        onConnected()
     }
 
     Column(

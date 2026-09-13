@@ -2,6 +2,7 @@ package com.shortrange.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -43,7 +44,10 @@ fun JoinSessionScreen(
     onBackClick: () -> Unit,
     onJoinSuccess: (String) -> Unit
 ) {
-    var sessionCode by remember { mutableStateOf("SR-4821") }
+    var sessionCode by remember { mutableStateOf("") }
+    var isJoining by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     Column(
         modifier = Modifier
@@ -64,7 +68,7 @@ fun JoinSessionScreen(
         ) {
             Column {
                 Text(
-                    text = "ENTER SESSION CODE",
+                    text = "ENTER 6-CHARACTER SESSION CODE",
                     style = IndustrialLabelMono.copy(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
@@ -74,15 +78,18 @@ fun JoinSessionScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Input box
+                // Input box for 6-character code (e.g. A83F21)
                 BasicTextField(
                     value = sessionCode,
-                    onValueChange = { sessionCode = it.uppercase().take(8) },
+                    onValueChange = {
+                        sessionCode = it.uppercase().filter { c -> c.isLetterOrDigit() }.take(6)
+                        errorMessage = null
+                    },
                     textStyle = IndustrialDataMono.copy(
                         fontSize = 30.sp,
                         fontWeight = FontWeight.Bold,
                         textAlign = TextAlign.Center,
-                        letterSpacing = 2.sp,
+                        letterSpacing = 4.sp,
                         color = PrimaryBlack
                     ),
                     singleLine = true,
@@ -93,8 +100,18 @@ fun JoinSessionScreen(
                     ),
                     keyboardActions = KeyboardActions(
                         onDone = {
-                            if (sessionCode.isNotBlank()) {
-                                onJoinSuccess(sessionCode)
+                            if (sessionCode.length == 6 && !isJoining) {
+                                isJoining = true
+                                errorMessage = null
+                                scope.launch {
+                                    val result = com.shortrange.app.supabase.SupabaseManager.joinSession(sessionCode)
+                                    isJoining = false
+                                    result.onSuccess { resp ->
+                                        onJoinSuccess(resp.session_code)
+                                    }.onFailure { err ->
+                                        errorMessage = err.message ?: "Failed to join session"
+                                    }
+                                }
                             }
                         }
                     ),
@@ -109,27 +126,58 @@ fun JoinSessionScreen(
                             verticalArrangement = Arrangement.Center,
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            innerTextField()
+                            if (sessionCode.isEmpty()) {
+                                Text(
+                                    text = "A83F21",
+                                    style = IndustrialDataMono.copy(
+                                        fontSize = 30.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center,
+                                        letterSpacing = 4.sp,
+                                        color = PrimaryBlack.copy(alpha = 0.2f)
+                                    )
+                                )
+                            } else {
+                                innerTextField()
+                            }
                         }
                     }
                 )
 
+                if (errorMessage != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "ERROR: $errorMessage",
+                        style = IndustrialLabelMono.copy(fontSize = 11.sp, color = com.shortrange.app.ui.theme.SignalRed)
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(20.dp))
 
                 IndustrialPrimaryButton(
-                    text = "JOIN SESSION",
+                    text = if (isJoining) "CONNECTING..." else "JOIN SESSION",
                     onClick = {
-                        if (sessionCode.isNotBlank()) {
-                            onJoinSuccess(sessionCode)
+                        if (sessionCode.length == 6 && !isJoining) {
+                            isJoining = true
+                            errorMessage = null
+                            scope.launch {
+                                val result = com.shortrange.app.supabase.SupabaseManager.joinSession(sessionCode)
+                                isJoining = false
+                                result.onSuccess { resp ->
+                                    onJoinSuccess(resp.session_code)
+                                }.onFailure { err ->
+                                    errorMessage = err.message ?: "Failed to join session"
+                                }
+                            }
                         }
                     },
-                    enabled = sessionCode.length >= 4
+                    enabled = sessionCode.length == 6 && !isJoining
                 )
 
                 Spacer(modifier = Modifier.height(28.dp))
 
                 Text(
-                    text = "SESSION CODES ARE TEMPORARY\nAND EXPIRE AFTER THE CALL.",
+                    text = "SESSION CODES ARE 6-CHARACTERS\nAND EXPIRE AFTER THE CALL.",
                     style = IndustrialLabelMono.copy(fontSize = 11.sp, lineHeight = 15.sp)
                 )
             }

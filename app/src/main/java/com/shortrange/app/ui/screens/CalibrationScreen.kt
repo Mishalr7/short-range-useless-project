@@ -11,23 +11,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.shortrange.app.proximity.ProximityEngine
 import com.shortrange.app.ui.components.IndustrialHeader
 import com.shortrange.app.ui.components.IndustrialPanel
 import com.shortrange.app.ui.components.IndustrialPrimaryButton
@@ -43,8 +40,18 @@ fun CalibrationScreen(
     onBackClick: () -> Unit,
     onEstablishVoiceChannel: () -> Unit
 ) {
-    var isCalibrated by remember { mutableStateOf(false) }
-    var activeSegments by remember { mutableIntStateOf(11) }
+    val proximityEngine = ProximityEngine.getInstance()
+    val telemetry by proximityEngine.telemetry.collectAsState()
+    val isCalibrated = telemetry.isCalibrated
+    val isPeerPresent = telemetry.isPeerPresent
+
+    // Map filtered RSSI to meter bars (-100 dBm to -40 dBm -> 0 to 20 segments)
+    val rawSegments = if (isPeerPresent) {
+        ((telemetry.filteredRssi + 100) / 3).coerceIn(1, 20)
+    } else {
+        0
+    }
+    val activeSegments = if (isCalibrated) 20 else rawSegments
 
     Column(
         modifier = Modifier
@@ -113,13 +120,13 @@ fun CalibrationScreen(
                             style = IndustrialLabelMono
                         )
                         Text(
-                            text = "-47 dBm (STABLE)",
+                            text = "${telemetry.referenceRssi} dBm (STABLE)",
                             style = IndustrialDataMono.copy(fontSize = 13.sp),
                             color = PrimaryBlack
                         )
                     } else {
                         Text(
-                            text = "SIGNAL STRENGTH",
+                            text = if (isPeerPresent) "SIGNAL STRENGTH (${telemetry.filteredRssi} dBm)" else "SIGNAL STRENGTH",
                             style = IndustrialLabelMono
                         )
                     }
@@ -127,7 +134,7 @@ fun CalibrationScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     SegmentedMeter(
-                        activeSegments = if (isCalibrated) 20 else activeSegments,
+                        activeSegments = activeSegments,
                         totalSegments = 20,
                         activeColor = PrimaryBlack
                     )
@@ -136,7 +143,7 @@ fun CalibrationScreen(
 
                     if (!isCalibrated) {
                         Text(
-                            text = "STABILIZING...",
+                            text = if (isPeerPresent) "SIGNAL DETECTED. READY TO CALIBRATE." else "WAITING FOR PEER SIGNAL...",
                             style = IndustrialLabelMono
                         )
                     }
@@ -162,7 +169,7 @@ fun CalibrationScreen(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "MEASURING...",
+                            text = if (isPeerPresent) "SIGNAL DETECTED (${telemetry.filteredRssi} dBm)" else "SCANNING FOR PEER...",
                             style = IndustrialLabelMono.copy(color = PrimaryBlack)
                         )
                     }
@@ -184,15 +191,17 @@ fun CalibrationScreen(
                     )
                 } else {
                     IndustrialPrimaryButton(
-                        text = "CALIBRATE REFERENCE",
+                        text = if (isPeerPresent) "CALIBRATE REFERENCE" else "WAITING FOR PEER...",
+                        enabled = isPeerPresent,
                         onClick = {
-                            isCalibrated = true
-                            activeSegments = 20
+                            if (isPeerPresent) {
+                                proximityEngine.calibrateReference()
+                            }
                         }
                     )
                     Spacer(modifier = Modifier.height(14.dp))
                     Text(
-                        text = "KEEP DEVICES CLOSE AND STILL UNTIL STABLE.",
+                        text = if (isPeerPresent) "HOLD DEVICES TOGETHER AND PRESS CALIBRATE." else "PLACE BOTH DEVICES TOGETHER TO DETECT PEER.",
                         style = IndustrialLabelMono.copy(fontSize = 11.sp),
                         modifier = Modifier.padding(horizontal = 4.dp)
                     )

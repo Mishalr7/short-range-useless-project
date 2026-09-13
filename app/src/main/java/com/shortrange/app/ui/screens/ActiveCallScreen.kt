@@ -3,7 +3,6 @@ package com.shortrange.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +28,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -37,14 +37,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.shortrange.app.model.CallQualityState
 import com.shortrange.app.model.FaultType
-import com.shortrange.app.model.MockTelemetryProvider
-import com.shortrange.app.ui.components.IndustrialDangerButton
+import com.shortrange.app.proximity.ProximityEngine
+import com.shortrange.app.proximity.model.ProximityZone
 import com.shortrange.app.ui.components.IndustrialHeader
-import com.shortrange.app.ui.components.IndustrialOutlineButton
 import com.shortrange.app.ui.components.IndustrialPanel
 import com.shortrange.app.ui.components.ProximityDiagram
 import com.shortrange.app.ui.components.TelemetryCell
@@ -64,11 +63,16 @@ fun ActiveCallScreen(
     onEndCallClick: () -> Unit,
     onFaultOccurred: (FaultType) -> Unit
 ) {
-    var qualityState by remember { mutableStateOf(CallQualityState.GOOD) }
-    var isMuted by remember { mutableStateOf(false) }
-    var callSeconds by remember { mutableIntStateOf(137) } // 00:02:17
+    val proximityEngine = ProximityEngine.getInstance()
+    val proximityTelemetry by proximityEngine.telemetry.collectAsState()
 
-    // Timer simulation
+    val webrtcCallManager = com.shortrange.app.webrtc.WebRtcCallManager.getInstance()
+    val webrtcCallState by webrtcCallManager.callState.collectAsState()
+
+    var isMuted by remember { mutableStateOf(false) }
+    var callSeconds by remember { mutableIntStateOf(0) }
+
+    // Call duration timer
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
@@ -76,17 +80,27 @@ fun ActiveCallScreen(
         }
     }
 
-    val telemetry = when (qualityState) {
-        CallQualityState.GOOD -> MockTelemetryProvider.Good
-        CallQualityState.DEGRADING -> MockTelemetryProvider.Degrading
-        CallQualityState.CRITICAL -> MockTelemetryProvider.Critical
+    // Monitor WebRTC connection failure
+    LaunchedEffect(webrtcCallState) {
+        if (webrtcCallState == com.shortrange.app.webrtc.CallState.FAILED) {
+            onFaultOccurred(FaultType.NETWORK_FAULT_02)
+        }
     }
 
-    val integrityColor = when (qualityState) {
-        CallQualityState.GOOD -> TelemetryGreen
-        CallQualityState.DEGRADING -> TelemetryAmber
-        CallQualityState.CRITICAL -> SignalRed
+    val isAcquiring = webrtcCallState == com.shortrange.app.webrtc.CallState.CONNECTING || !proximityTelemetry.isPeerPresent
+
+    // Map ProximityZone to visual UI telemetry
+    val (integrityPct, proximityLabel, audioLabel, separationRatio, integrityColor) = when {
+        isAcquiring -> Quintuple(100, "ACQUIRING LINK...", "INITIALIZING", 0.15f, TelemetryGreen)
+        proximityTelemetry.zone == ProximityZone.VERY_CLOSE -> Quintuple(100, "VERY CLOSE", "GOOD", 0.15f, TelemetryGreen)
+        proximityTelemetry.zone == ProximityZone.CLOSE -> Quintuple(85, "CLOSE", "GOOD", 0.35f, TelemetryGreen)
+        proximityTelemetry.zone == ProximityZone.DRIFTING -> Quintuple(61, "DRIFTING", "DEGRADED", 0.55f, TelemetryAmber)
+        proximityTelemetry.zone == ProximityZone.FAR -> Quintuple(35, "FAR", "DEGRADED", 0.72f, TelemetryAmber)
+        proximityTelemetry.zone == ProximityZone.CRITICAL -> Quintuple(9, "CRITICAL", "SEVERELY DEGRADED", 0.90f, SignalRed)
+        else -> Quintuple(0, "LOST", "DISCONNECTED", 0.95f, SignalRed)
     }
+
+    val isCritical = proximityTelemetry.zone == ProximityZone.CRITICAL
 
     val formattedTime = String.format(
         "%02d:%02d:%02d",
@@ -140,7 +154,6 @@ fun ActiveCallScreen(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Communication Integrity Card
-                val isCritical = qualityState == CallQualityState.CRITICAL
                 IndustrialPanel(
                     borderColor = if (isCritical) SignalRed else LightBorder,
                     borderWidth = if (isCritical) 1.5.dp else 1.dp,
@@ -156,7 +169,7 @@ fun ActiveCallScreen(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Text(
-                        text = "${telemetry.integrity}%",
+                        text = "$integrityPct%",
                         style = IndustrialTelemetryValue.copy(
                             color = if (isCritical) SignalRed else PrimaryBlack
                         )
@@ -173,7 +186,7 @@ fun ActiveCallScreen(
                     ) {
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth(telemetry.integrity / 100f)
+                                .fillMaxWidth((integrityPct / 100f).coerceIn(0f, 1f))
                                 .height(6.dp)
                                 .background(integrityColor)
                         )
@@ -183,7 +196,7 @@ fun ActiveCallScreen(
 
                     // Proximity diagram
                     ProximityDiagram(
-                        separationRatio = telemetry.separationRatio,
+                        separationRatio = separationRatio,
                         lineColor = integrityColor
                     )
                 }
@@ -197,13 +210,13 @@ fun ActiveCallScreen(
                 ) {
                     TelemetryCell(
                         label = "PROXIMITY",
-                        value = telemetry.proximityText,
+                        value = proximityLabel,
                         valueColor = integrityColor,
                         modifier = Modifier.weight(1f)
                     )
                     TelemetryCell(
                         label = "AUDIO",
-                        value = telemetry.audioText,
+                        value = audioLabel,
                         valueColor = integrityColor,
                         modifier = Modifier.weight(1f)
                     )
@@ -216,13 +229,13 @@ fun ActiveCallScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     TelemetryCell(
-                        label = "LATENCY",
-                        value = "+${telemetry.latencyMs} MS",
+                        label = "SIGNAL (RSSI)",
+                        value = "${proximityTelemetry.filteredRssi} DBM",
                         modifier = Modifier.weight(1f)
                     )
                     TelemetryCell(
-                        label = "FRAME LOSS",
-                        value = "${telemetry.frameLossPct}%",
+                        label = "SEPARATION",
+                        value = "+${proximityTelemetry.deltaRssi.coerceAtLeast(0)} DB",
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -265,7 +278,11 @@ fun ActiveCallScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     OutlinedButton(
-                        onClick = { isMuted = !isMuted },
+                        onClick = {
+                            val newMute = !isMuted
+                            isMuted = newMute
+                            webrtcCallManager.setMuted(newMute)
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(50.dp),
@@ -287,7 +304,10 @@ fun ActiveCallScreen(
                     }
 
                     Button(
-                        onClick = onEndCallClick,
+                        onClick = {
+                            webrtcCallManager.endCall()
+                            onEndCallClick()
+                        },
                         modifier = Modifier
                             .weight(1.4f)
                             .height(50.dp),
@@ -311,40 +331,46 @@ fun ActiveCallScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Interactive Proximity Simulator Bar (for Phase 1 UI validation)
+                // Interactive Proximity Simulator Bar (for Phase 2 testing & demonstration fallback)
                 IndustrialPanel {
-                    Text(
-                        text = "TEST CONTROLS — SIMULATE DISTANCE STATE",
-                        style = IndustrialLabelMono.copy(fontSize = 9.sp)
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "PROXIMITY ENGINE: ${proximityTelemetry.statusMessage}",
+                            style = IndustrialLabelMono.copy(fontSize = 9.sp)
+                        )
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         TestStateButton(
-                            title = "GOOD",
-                            isSelected = qualityState == CallQualityState.GOOD,
+                            title = "CLOSE",
+                            isSelected = proximityTelemetry.zone == ProximityZone.VERY_CLOSE,
                             modifier = Modifier.weight(1f)
-                        ) { qualityState = CallQualityState.GOOD }
+                        ) { proximityEngine.setSimulationZone(ProximityZone.VERY_CLOSE) }
 
                         TestStateButton(
                             title = "DRIFT",
-                            isSelected = qualityState == CallQualityState.DEGRADING,
+                            isSelected = proximityTelemetry.zone == ProximityZone.DRIFTING,
                             modifier = Modifier.weight(1f)
-                        ) { qualityState = CallQualityState.DEGRADING }
+                        ) { proximityEngine.setSimulationZone(ProximityZone.DRIFTING) }
 
                         TestStateButton(
                             title = "CRIT",
-                            isSelected = qualityState == CallQualityState.CRITICAL,
+                            isSelected = proximityTelemetry.zone == ProximityZone.CRITICAL,
                             modifier = Modifier.weight(1f)
-                        ) { qualityState = CallQualityState.CRITICAL }
+                        ) { proximityEngine.setSimulationZone(ProximityZone.CRITICAL) }
 
                         TestStateButton(
                             title = "FAULT 04",
                             isSelected = false,
                             modifier = Modifier.weight(1.3f)
-                        ) { onFaultOccurred(FaultType.PROXIMITY_FAULT_04) }
+                        ) { proximityEngine.setSimulationZone(ProximityZone.LOST) }
 
                         TestStateButton(
                             title = "FAULT 02",
@@ -357,6 +383,14 @@ fun ActiveCallScreen(
         }
     }
 }
+
+private data class Quintuple<A, B, C, D, E>(
+    val first: A,
+    val second: B,
+    val third: C,
+    val fourth: D,
+    val fifth: E
+)
 
 @Composable
 private fun TestStateButton(

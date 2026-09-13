@@ -23,6 +23,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +37,10 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.shortrange.app.proximity.BleRole
+import com.shortrange.app.proximity.ProximityEngine
+import com.shortrange.app.supabase.CreateSessionResponse
+import com.shortrange.app.supabase.SupabaseManager
 import com.shortrange.app.ui.components.IndustrialHeader
 import com.shortrange.app.ui.components.IndustrialOutlineButton
 import com.shortrange.app.ui.components.IndustrialPanel
@@ -54,8 +60,38 @@ fun CreateSessionScreen(
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
-    val sessionCode = "SR-4821"
+    val telemetry by ProximityEngine.getInstance().telemetry.collectAsState()
+
+    var sessionCode by remember { mutableStateOf(SupabaseManager.activeSession?.sessionCode ?: "------") }
+    var isCreating by remember { mutableStateOf(SupabaseManager.activeSession == null) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
     var participant2Connected by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        if (SupabaseManager.activeSession == null) {
+            isCreating = true
+            errorMessage = null
+            val result = SupabaseManager.createSession()
+            result.onSuccess { resp ->
+                val code = resp.session_code.trim().uppercase()
+                sessionCode = code
+                isCreating = false
+                // Start BLE transceiver with the exact 6-character Supabase code
+                ProximityEngine.getInstance().start(BleRole.TRANSCEIVER, code)
+            }.onFailure { err ->
+                isCreating = false
+                errorMessage = err.message ?: "Failed to create Supabase session"
+            }
+        } else {
+            sessionCode = SupabaseManager.activeSession?.sessionCode ?: "------"
+        }
+    }
+
+    LaunchedEffect(telemetry.isPeerPresent) {
+        if (telemetry.isPeerPresent) {
+            participant2Connected = true
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -102,35 +138,44 @@ fun CreateSessionScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = sessionCode,
+                            text = if (isCreating) "CREATING..." else sessionCode,
                             style = IndustrialDataMono.copy(
-                                fontSize = 32.sp,
+                                fontSize = if (isCreating) 22.sp else 32.sp,
                                 fontWeight = FontWeight.Bold,
                                 letterSpacing = 2.sp
                             ),
                             color = PrimaryBlack
                         )
 
-                        IconButton(
-                            onClick = {
-                                clipboardManager.setText(AnnotatedString(sessionCode))
-                                Toast.makeText(context, "Session code copied", Toast.LENGTH_SHORT).show()
+                        if (!isCreating && sessionCode != "------") {
+                            IconButton(
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(sessionCode))
+                                    Toast.makeText(context, "Session code copied", Toast.LENGTH_SHORT).show()
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy code",
+                                    tint = PrimaryBlack
+                                )
                             }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = "Copy code",
-                                tint = PrimaryBlack
-                            )
                         }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Text(
-                        text = "SHARE THIS CODE WITH\nTHE OTHER PARTICIPANT.",
-                        style = IndustrialLabelMono.copy(fontSize = 11.sp, lineHeight = 14.sp)
-                    )
+                    if (errorMessage != null) {
+                        Text(
+                            text = "ERROR: $errorMessage",
+                            style = IndustrialLabelMono.copy(fontSize = 11.sp, color = com.shortrange.app.ui.theme.SignalRed)
+                        )
+                    } else {
+                        Text(
+                            text = "SHARE THIS 6-CHARACTER CODE WITH\nTHE OTHER PARTICIPANT.",
+                            style = IndustrialLabelMono.copy(fontSize = 11.sp, lineHeight = 14.sp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))

@@ -3,6 +3,9 @@ package com.shortrange.app.webrtc
 import android.content.Context
 import android.media.AudioManager
 import android.util.Log
+import com.shortrange.app.proximity.model.ProximityZone
+import com.shortrange.app.webrtc.audio.AudioDegradationEngine
+import com.shortrange.app.webrtc.audio.CommunicationQuality
 import com.shortrange.app.webrtc.signaling.IceCandidateModel
 import com.shortrange.app.webrtc.signaling.SignalingEvent
 import com.shortrange.app.webrtc.signaling.SignalingProvider
@@ -33,14 +36,14 @@ import org.webrtc.audio.JavaAudioDeviceModule
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Dedicated WebRTC voice call manager for Phase 3.
+ * Dedicated WebRTC voice call manager for Phase 3 and Phase 4.
  *
  * Responsibilities:
  * - Real-time microphone capture with hardware AEC, NS, and AGC.
  * - Unified Plan PeerConnection with Google STUN.
  * - Bidirectional audio streaming over WebRTC.
- * - Decoupled from BLE proximity (audio remains clean).
  * - SignalingProvider integration with Supabase Realtime.
+ * - Proximity-controlled audio degradation via AudioDegradationEngine.
  */
 class WebRtcCallManager private constructor(
     private val context: Context,
@@ -52,9 +55,9 @@ class WebRtcCallManager private constructor(
         @Volatile
         private var instance: WebRtcCallManager? = null
 
-        fun initialize(context: Context, signaling: SignalingProvider = SupabaseSignalingProvider()): WebRtcCallManager {
+        fun initialize(context: Context): WebRtcCallManager {
             return instance ?: synchronized(this) {
-                instance ?: WebRtcCallManager(context.applicationContext, signaling).also { instance = it }
+                instance ?: WebRtcCallManager(context.applicationContext).also { instance = it }
             }
         }
 
@@ -69,6 +72,8 @@ class WebRtcCallManager private constructor(
     }
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val audioDegradationEngine = AudioDegradationEngine()
+    val currentQuality: StateFlow<CommunicationQuality> = audioDegradationEngine.currentQuality
 
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var audioDeviceModule: JavaAudioDeviceModule? = null
@@ -77,6 +82,10 @@ class WebRtcCallManager private constructor(
     private var audioSource: AudioSource? = null
     private var localAudioTrack: AudioTrack? = null
     private var remoteAudioTrack: AudioTrack? = null
+
+    fun updateProximityZone(zone: ProximityZone) {
+        audioDegradationEngine.updateProximityZone(zone)
+    }
 
     private val earlyIceCandidates = CopyOnWriteArrayList<IceCandidate>()
     private var isRemoteDescriptionSet = false
@@ -272,8 +281,7 @@ class WebRtcCallManager private constructor(
                 if (track is AudioTrack) {
                     Log.i(TAG, "REMOTE_AUDIO_TRACK_RECEIVED: id=${track.id()}, enabled=${track.enabled()}")
                     remoteAudioTrack = track
-                    track.setEnabled(true)
-                    track.setVolume(1.0)
+                    audioDegradationEngine.attachRemoteAudioTrack(track)
                 }
             }
 
@@ -505,6 +513,7 @@ class WebRtcCallManager private constructor(
 
     fun endCall() {
         Log.i(TAG, "Ending WebRTC call and releasing resources")
+        audioDegradationEngine.reset()
         offerResendJob?.cancel()
         offerResendJob = null
         lastLocalOfferSdp = null

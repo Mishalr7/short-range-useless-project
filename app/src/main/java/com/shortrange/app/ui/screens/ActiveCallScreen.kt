@@ -80,6 +80,13 @@ fun ActiveCallScreen(
         }
     }
 
+    var hasEstablishedConnection by remember { mutableStateOf(false) }
+
+    // Synchronize proximity zone to WebRTC audio degradation
+    LaunchedEffect(proximityTelemetry.zone) {
+        webrtcCallManager.updateProximityZone(proximityTelemetry.zone)
+    }
+
     // Monitor WebRTC connection failure
     LaunchedEffect(webrtcCallState) {
         if (webrtcCallState == com.shortrange.app.webrtc.CallState.FAILED) {
@@ -87,17 +94,27 @@ fun ActiveCallScreen(
         }
     }
 
+    // Monitor Proximity Lost transition once call has been active
+    LaunchedEffect(webrtcCallState, proximityTelemetry.zone, proximityTelemetry.isPeerPresent) {
+        if (webrtcCallState == com.shortrange.app.webrtc.CallState.CONNECTED && (proximityTelemetry.isPeerPresent || proximityEngine.isSimulating())) {
+            hasEstablishedConnection = true
+        }
+        if (hasEstablishedConnection && proximityTelemetry.zone == ProximityZone.LOST) {
+            onFaultOccurred(FaultType.PROXIMITY_FAULT_04)
+        }
+    }
+
     val isAcquiring = webrtcCallState == com.shortrange.app.webrtc.CallState.CONNECTING || !proximityTelemetry.isPeerPresent
 
-    // Map ProximityZone to visual UI telemetry
+    // Map ProximityZone to visual UI telemetry per Phase 4 CommunicationPolicy
     val (integrityPct, proximityLabel, audioLabel, separationRatio, integrityColor) = when {
         isAcquiring -> Quintuple(100, "ACQUIRING LINK...", "INITIALIZING", 0.15f, TelemetryGreen)
         proximityTelemetry.zone == ProximityZone.VERY_CLOSE -> Quintuple(100, "VERY CLOSE", "GOOD", 0.15f, TelemetryGreen)
-        proximityTelemetry.zone == ProximityZone.CLOSE -> Quintuple(85, "CLOSE", "GOOD", 0.35f, TelemetryGreen)
-        proximityTelemetry.zone == ProximityZone.DRIFTING -> Quintuple(61, "DRIFTING", "DEGRADED", 0.55f, TelemetryAmber)
-        proximityTelemetry.zone == ProximityZone.FAR -> Quintuple(35, "FAR", "DEGRADED", 0.72f, TelemetryAmber)
-        proximityTelemetry.zone == ProximityZone.CRITICAL -> Quintuple(9, "CRITICAL", "SEVERELY DEGRADED", 0.90f, SignalRed)
-        else -> Quintuple(0, "LOST", "DISCONNECTED", 0.95f, SignalRed)
+        proximityTelemetry.zone == ProximityZone.CLOSE -> Quintuple(80, "CLOSE", "SLIGHT DEGRADATION", 0.35f, TelemetryGreen)
+        proximityTelemetry.zone == ProximityZone.DRIFTING -> Quintuple(60, "DRIFTING", "DEGRADED", 0.55f, TelemetryAmber)
+        proximityTelemetry.zone == ProximityZone.FAR -> Quintuple(30, "FAR", "HEAVY DEGRADATION", 0.72f, TelemetryAmber)
+        proximityTelemetry.zone == ProximityZone.CRITICAL -> Quintuple(10, "CRITICAL", "SEVERELY DEGRADED", 0.90f, SignalRed)
+        else -> Quintuple(0, "LOST", "COMMUNICATION LOST", 0.95f, SignalRed)
     }
 
     val isCritical = proximityTelemetry.zone == ProximityZone.CRITICAL
@@ -346,13 +363,19 @@ fun ActiveCallScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         TestStateButton(
-                            title = "CLOSE",
+                            title = "V.CLOSE",
                             isSelected = proximityTelemetry.zone == ProximityZone.VERY_CLOSE,
                             modifier = Modifier.weight(1f)
                         ) { proximityEngine.setSimulationZone(ProximityZone.VERY_CLOSE) }
+
+                        TestStateButton(
+                            title = "CLOSE",
+                            isSelected = proximityTelemetry.zone == ProximityZone.CLOSE,
+                            modifier = Modifier.weight(1f)
+                        ) { proximityEngine.setSimulationZone(ProximityZone.CLOSE) }
 
                         TestStateButton(
                             title = "DRIFT",
@@ -361,22 +384,22 @@ fun ActiveCallScreen(
                         ) { proximityEngine.setSimulationZone(ProximityZone.DRIFTING) }
 
                         TestStateButton(
+                            title = "FAR",
+                            isSelected = proximityTelemetry.zone == ProximityZone.FAR,
+                            modifier = Modifier.weight(1f)
+                        ) { proximityEngine.setSimulationZone(ProximityZone.FAR) }
+
+                        TestStateButton(
                             title = "CRIT",
                             isSelected = proximityTelemetry.zone == ProximityZone.CRITICAL,
                             modifier = Modifier.weight(1f)
                         ) { proximityEngine.setSimulationZone(ProximityZone.CRITICAL) }
 
                         TestStateButton(
-                            title = "FAULT 04",
-                            isSelected = false,
-                            modifier = Modifier.weight(1.3f)
+                            title = "LOST",
+                            isSelected = proximityTelemetry.zone == ProximityZone.LOST,
+                            modifier = Modifier.weight(1f)
                         ) { proximityEngine.setSimulationZone(ProximityZone.LOST) }
-
-                        TestStateButton(
-                            title = "FAULT 02",
-                            isSelected = false,
-                            modifier = Modifier.weight(1.3f)
-                        ) { onFaultOccurred(FaultType.NETWORK_FAULT_02) }
                     }
                 }
             }
